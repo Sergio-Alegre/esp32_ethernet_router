@@ -27,6 +27,9 @@
 #include "esp_wifi.h"
 
 #include "lwip/ip4_addr.h"
+#include "lwip/netif.h"
+#include "esp_netif.h"
+#include "esp_netif_net_stack.h"
 #if !IP_NAPT
 #error "IP_NAPT must be defined"
 #endif
@@ -1422,10 +1425,11 @@ static int show(int argc, char **argv)
     }
 
     if (show_args.type->count == 0) {
-        printf("Usage: show <status|config|mappings|acl|vpn|ota>\n");
+        printf("Usage: show <status|config|mappings|route|acl|vpn|ota>\n");
         printf("  status   - Show router status (connection, clients, memory)\n");
         printf("  config   - Show router configuration (STA/downlink settings)\n");
         printf("  mappings - Show DHCP pool, reservations and port mappings\n");
+        printf("  route    - Show routing table (interfaces, connected + default routes)\n");
         printf("  acl      - Show firewall ACL rules\n");
         printf("  vpn      - Show WireGuard VPN status and config\n");
         return 1;
@@ -1732,8 +1736,100 @@ static int show(int argc, char **argv)
             printf("Image state: %s\n", state_str);
         }
 
+    } else if (strcmp(type, "route") == 0) {
+        // Routing table. lwIP here has no general FIB: routing is each netif's
+        // IP&netmask (its connected route) plus the single netif_default, whose
+        // gateway is the default route. We walk the raw lwIP netif_list (not
+        // esp_netif) so the WireGuard netif — added directly via netif_add and
+        // not managed by esp_netif — also shows up.
+        //
+        // NOTE: do NOT reverse-map an arbitrary lwIP netif to esp_netif. The WG
+        // netif's ->state points to the WireGuard device context, so
+        // esp_netif_get_handle_from_netif_impl() would hand back a bogus pointer
+        // that crashes when dereferenced. Instead resolve the two known managed
+        // handles up front and match by impl pointer; anything else is raw.
+        struct netif *def = netif_default;
+        ip4_addr_t def_gw = { 0 };
+        char def_name[8] = "?";
+        struct netif *nif;
+
+        esp_netif_t *sta_h = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+        esp_netif_t *eth_h = esp_netif_get_handle_from_ifkey("ETH_DEF");
+        struct netif *sta_if = sta_h ? (struct netif *)esp_netif_get_netif_impl(sta_h) : NULL;
+        struct netif *eth_if = eth_h ? (struct netif *)esp_netif_get_netif_impl(eth_h) : NULL;
+
+        printf("Routing Table:\n");
+        printf("==============\n");
+        printf("%-10s %-15s %-15s %-15s %4s %-4s %s\n",
+               "Iface", "IP", "Netmask", "Gateway", "Prio", "Link", "Default");
+
+        NETIF_FOREACH(nif) {
+            ip4_addr_t ip = { .addr = netif_ip4_addr(nif)->addr };
+            ip4_addr_t mask = { .addr = netif_ip4_netmask(nif)->addr };
+            ip4_addr_t gw = { .addr = netif_ip4_gw(nif)->addr };
+            bool is_def = (nif == def);
+
+            esp_netif_t *eh = (nif == sta_if) ? sta_h : (nif == eth_if) ? eth_h : NULL;
+
+            // Prefer the esp_netif desc for managed netifs; fall back to the lwIP
+            // name (e.g. "wg0", "lo0") for raw ones like the WireGuard tunnel.
+            char name[8];
+            snprintf(name, sizeof(name), "%c%c%d", nif->name[0], nif->name[1], nif->num);
+            const char *label = (eh != NULL) ? esp_netif_get_desc(eh) : name;
+            if (label == NULL) {
+                label = name;
+            }
+
+            char prio[6];
+            if (eh != NULL) {
+                snprintf(prio, sizeof(prio), "%d", esp_netif_get_route_prio(eh));
+            } else {
+                snprintf(prio, sizeof(prio), "-");
+            }
+
+            if (is_def) {
+                def_gw.addr = gw.addr;
+                snprintf(def_name, sizeof(def_name), "%s", label);
+            }
+
+            char ips[16], masks[16], gws[16];
+            snprintf(ips, sizeof(ips), IPSTR, IP2STR(&ip));
+            snprintf(masks, sizeof(masks), IPSTR, IP2STR(&mask));
+            snprintf(gws, sizeof(gws), IPSTR, IP2STR(&gw));
+            printf("%-10s %-15s %-15s %-15s %4s %-4s %s\n",
+                   label, ips, masks, gws, prio,
+                   netif_is_up(nif) ? "up" : "down",
+                   is_def ? "*" : "");
+        }
+
+        // Derived view: connected routes (one per up netif with an address).
+        printf("\nConnected routes:\n");
+        NETIF_FOREACH(nif) {
+            uint32_t addr = netif_ip4_addr(nif)->addr;
+            uint32_t nm = netif_ip4_netmask(nif)->addr;
+            if (!netif_is_up(nif) || addr == 0) {
+                continue;
+            }
+            ip4_addr_t net = { .addr = addr & nm };
+            int prefix = 0;
+            for (uint32_t m = lwip_ntohl(nm); m & 0x80000000u; m <<= 1) {
+                prefix++;
+            }
+            char name[8];
+            snprintf(name, sizeof(name), "%c%c%d", nif->name[0], nif->name[1], nif->num);
+            esp_netif_t *eh = (nif == sta_if) ? sta_h : (nif == eth_if) ? eth_h : NULL;
+            const char *label = (eh != NULL) ? esp_netif_get_desc(eh) : name;
+            printf("  " IPSTR "/%d dev %s\n", IP2STR(&net), prefix, label ? label : name);
+        }
+
+        if (def != NULL) {
+            printf("Default route: via " IPSTR " dev %s\n", IP2STR(&def_gw), def_name);
+        } else {
+            printf("Default route: none\n");
+        }
+
     } else {
-        printf("Invalid parameter. Use: show <status|config|mappings|acl|vpn|ota>\n");
+        printf("Invalid parameter. Use: show <status|config|mappings|route|acl|vpn|ota>\n");
         return 1;
     }
 
@@ -1742,12 +1838,12 @@ static int show(int argc, char **argv)
 
 static void register_show(void)
 {
-    show_args.type = arg_str1(NULL, NULL, "[status|config|mappings|acl|vpn|ota]", "Type of information");
+    show_args.type = arg_str1(NULL, NULL, "[status|config|mappings|route|acl|vpn|ota]", "Type of information");
     show_args.end = arg_end(1);
 
     const esp_console_cmd_t cmd = {
         .command = "show",
-        .help = "Show router status, config, mappings, ACL rules, VPN or OTA info",
+        .help = "Show router status, config, mappings, routes, ACL rules, VPN or OTA info",
         .hint = NULL,
         .func = &show,
         .argtable = &show_args

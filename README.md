@@ -555,6 +555,7 @@ Connect via serial at 115200 bps, or via the remote console.
 | Command | Description |
 |---------|-------------|
 | `show mappings` | DHCP pool, reservations, port maps |
+| `show route` | Routing table: interfaces, connected + default routes |
 | `dhcp_reserve add <mac> <ip> [-n <name>]` | Add DHCP reservation |
 | `dhcp_reserve del <mac>` | Remove DHCP reservation |
 | `portmap add <TCP\|UDP> <ext_port> <int_ip> <int_port>` | Add port forward rule |
