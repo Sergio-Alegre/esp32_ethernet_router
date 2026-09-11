@@ -154,8 +154,16 @@ static esp_err_t http_open_fn(httpd_handle_t hd, int sockfd)
     if (on_eth && (s_web_bind & RC_BIND_AP))  allowed = true;
     if (on_sta && (s_web_bind & RC_BIND_STA)) allowed = true;
     if (on_vpn && (s_web_bind & RC_BIND_VPN)) allowed = true;
-    /* If local_ip could not be determined, allow through (fail open) */
-    if (local_ip == 0) allowed = true;
+
+    /* An unknown local address used to be allowed through, which turned the
+     * whole interface restriction into a suggestion. getsockname() does not
+     * fail on an accepted socket in practice; if it ever does, refusing is the
+     * only answer that keeps the setting meaningful. Serial console recovery
+     * (web_ui bind all) is documented for the lockout case either way. */
+    if (local_ip == 0) {
+        ESP_LOGW(TAG, "HTTP connection rejected (local address unknown)");
+        return ESP_FAIL;
+    }
 
     if (!allowed) {
         ESP_LOGW(TAG, "HTTP connection rejected (interface not allowed, local=" IPSTR ")",
@@ -233,18 +241,28 @@ static bool get_cookie_value(httpd_req_t *req, const char* cookie_name,
         return false;
     }
 
-    // Search for the cookie name
+    /* Match the name only at a cookie boundary — a plain strstr() for
+     * "session=" also matches a cookie called "xsession", letting a caller
+     * supply the value the check is meant to verify. */
     char search_pattern[64];
     snprintf(search_pattern, sizeof(search_pattern), "%s=", cookie_name);
-    char* cookie_start = strstr(cookie_header, search_pattern);
+    size_t pattern_len = strlen(search_pattern);
+
+    char* cookie_start = NULL;
+    for (char* p = cookie_header; (p = strstr(p, search_pattern)) != NULL; p += pattern_len) {
+        bool at_boundary = (p == cookie_header) ||
+                           (p[-1] == ';') ||
+                           (p[-1] == ' ' && p >= cookie_header + 2 && p[-2] == ';');
+        if (at_boundary) {
+            cookie_start = p + pattern_len;
+            break;
+        }
+    }
 
     if (cookie_start == NULL) {
         free(cookie_header);
         return false;
     }
-
-    // Move past the "name=" part
-    cookie_start += strlen(search_pattern);
 
     // Find the end of the cookie value (semicolon or end of string)
     char* cookie_end = strchr(cookie_start, ';');
@@ -282,8 +300,17 @@ static bool is_authenticated(httpd_req_t *req)
         return false;
     }
 
-    // Validate token matches
-    if (strcmp(session_token, current_session_token) != 0) {
+    /* Constant-time compare: strcmp() returns as soon as two bytes differ, so
+     * response timing leaks how much of the token a guess got right. */
+    size_t expected_len = strlen(current_session_token);
+    if (strlen(session_token) != expected_len) {
+        return false;
+    }
+    uint8_t diff = 0;
+    for (size_t i = 0; i < expected_len; i++) {
+        diff |= (uint8_t)(session_token[i] ^ current_session_token[i]);
+    }
+    if (diff != 0) {
         return false;
     }
 
@@ -308,7 +335,7 @@ static esp_err_t create_session(httpd_req_t *req)
 
     // Set cookie in response (using static buffer because httpd stores pointer)
     snprintf(session_cookie_header, sizeof(session_cookie_header),
-             "session=%s; Path=/; SameSite=Strict", current_session_token);
+             "session=%s; Path=/; SameSite=Strict; HttpOnly", current_session_token);
     httpd_resp_set_hdr(req, "Set-Cookie", session_cookie_header);
 
     ESP_LOGI(TAG, "Session created, expires in 30 minutes");
@@ -355,8 +382,17 @@ static char *nvs_export_to_json_robust(void)
         nvs_entry_info_t info;
         nvs_entry_info(it, &info);
 
-        // Skip WireGuard secrets for security
-        if (strcmp(info.key, "vpn_privkey") == 0 || strcmp(info.key, "vpn_psk") == 0) {
+        /* Skip secrets — the export is a plaintext file anyone can take away:
+         *   passwd       — STA WiFi password (also the WPA-Enterprise EAP password)
+         *   vpn_privkey  — WireGuard private key
+         *   vpn_psk      — WireGuard pre-shared key
+         *   web_password — salt:hash of the web UI password (offline-grindable)
+         *   mqtt_pass    — MQTT broker credential */
+        if (strcmp(info.key, "passwd")       == 0 ||
+            strcmp(info.key, "vpn_privkey")  == 0 ||
+            strcmp(info.key, "vpn_psk")      == 0 ||
+            strcmp(info.key, "web_password") == 0 ||
+            strcmp(info.key, "mqtt_pass")    == 0) {
             err = nvs_entry_next(&it);
             continue;
         }
@@ -1465,7 +1501,13 @@ static esp_err_t config_get_handler(httpd_req_t *req)
     // Get current downlink IP address.  Copy into a stack buffer and free the
     // heap copy now, for the same reason as the escaped strings above.
     char ap_ip_str[16] = "";
-    {
+    if (eth_dhcpc_enabled) {
+        /* DHCP-client / uplink mode: the static ap_ip in NVS is ignored — the
+         * address comes from the upstream router. Show the live DHCP-assigned
+         * address so this page matches the home status page rather than the
+         * stale static config value. */
+        snprintf(ap_ip_str, sizeof(ap_ip_str), IPSTR, IP2STR((esp_ip4_addr_t *)&my_ap_ip));
+    } else {
         char *ap_ip_param = NULL;
         get_config_param_str("ap_ip", &ap_ip_param);
         if (ap_ip_param != NULL) {
@@ -1547,6 +1589,13 @@ static esp_err_t config_get_handler(httpd_req_t *req)
 
     /* Chunk 3: JavaScript */
     SEND_CHUNK(req, CONFIG_CHUNK_SCRIPT, HTTPD_RESP_USE_STRLEN);
+
+    /* Chunk 3b: DHCP-client / uplink mode banner (CLI-only mode) */
+    if (eth_dhcpc_enabled) {
+        SEND_CHUNK(req,
+            "<p style='color:#ffc107;font-size:0.85rem;margin-top:1rem;'>Ethernet is in DHCP-client (uplink) mode: its address is assigned by your upstream router, so the IP shown below is the live DHCP lease and the static IP / DHCP-server settings do not apply.</p>",
+            HTTPD_RESP_USE_STRLEN);
+    }
 
     /* Chunk 4: Ethernet Subnet Settings */
     snprintf(section, sizeof(section), CONFIG_CHUNK_AP,
@@ -1674,7 +1723,10 @@ static esp_err_t mappings_get_handler(httpd_req_t *req)
                 for (char *p = param1; *p; p++) {
                     if (*p == '+') *p = ' ';
                 }
-                snprintf(error_msg, sizeof(error_msg), "%s", param1);
+                /* Reflected straight back into the page below, so it has to be
+                 * escaped here — the value comes from the URL, which anyone can
+                 * craft and hand to an admin. */
+                html_escape_to(error_msg, sizeof(error_msg), param1);
             }
 
             /* Check for add DHCP reservation */
@@ -1904,15 +1956,21 @@ static esp_err_t mappings_get_handler(httpd_req_t *req)
                     clients[i].mac[2], clients[i].mac[3],
                     clients[i].mac[4], clients[i].mac[5]);
 
-                /* Escape single quotes in name for JavaScript */
-                char js_name[DHCP_RESERVATION_NAME_LEN * 2];
+                /* This lands inside onclick="fillDhcpForm('...')" — an HTML
+                 * attribute wrapping a JavaScript string literal, which needs two
+                 * layers of escaping to get right. Restricting the value to a safe
+                 * alphabet sidesteps both; device names are hostnames, so nothing
+                 * legitimate is lost. Escaping only the apostrophe, as this did
+                 * before, left <, ", and backslash to break out. */
+                char js_name[DHCP_RESERVATION_NAME_LEN];
                 const char *src_name = clients[i].name[0] ? clients[i].name : "";
                 int j = 0;
-                for (int k = 0; src_name[k] && j < (int)sizeof(js_name) - 2; k++) {
-                    if (src_name[k] == '\'') {
-                        js_name[j++] = '\\';
-                    }
-                    js_name[j++] = src_name[k];
+                for (int k = 0; src_name[k] && j < (int)sizeof(js_name) - 1; k++) {
+                    char c = src_name[k];
+                    bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                              (c >= '0' && c <= '9') || c == '-' || c == '.' ||
+                              c == '_' || c == ' ';
+                    js_name[j++] = ok ? c : '_';
                 }
                 js_name[j] = '\0';
 
@@ -1925,7 +1983,7 @@ static esp_err_t mappings_get_handler(httpd_req_t *req)
                     "</tr>",
                     mac_str,
                     ip_str,
-                    clients[i].name[0] ? clients[i].name : "-",
+                    js_name[0] ? js_name : "-",
                     mac_str,
                     clients[i].has_ip ? ip_str : "",
                     js_name
@@ -2120,7 +2178,8 @@ static esp_err_t firewall_get_handler(httpd_req_t *req)
                 for (char *p = error_param; *p; p++) {
                     if (*p == '+') *p = ' ';
                 }
-                snprintf(error_msg, sizeof(error_msg), "%s", error_param);
+                /* Reflected straight back into the page below — escape it. */
+                html_escape_to(error_msg, sizeof(error_msg), error_param);
             }
 
             /* Handle Add Rule */

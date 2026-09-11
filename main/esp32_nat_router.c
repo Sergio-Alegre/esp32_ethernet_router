@@ -453,7 +453,7 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
 
         // Start VPN connection if enabled
         if (vpn_enabled) {
-            xTaskCreate(vpn_connect_task, "vpn_connect", 4096, NULL, 5, NULL);
+            vpn_connect_task_start();
         }
 
         xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
@@ -496,9 +496,6 @@ static void eth_downlink_event_handler(void* arg, esp_event_base_t event_base,
         vpn_reassert_default_route();
     }
 }
-
-const int CONNECTED_BIT = BIT0;
-#define JOIN_TIMEOUT_MS (2000)
 
 // W5500 custom SPI driver lives in components/eth_w5500/w5500_spi_driver.c
 
@@ -760,8 +757,6 @@ void router_init(const uint8_t* mac, const char* ssid, const char* ent_username,
         }
     }
 
-    xEventGroupWaitBits(wifi_event_group, CONNECTED_BIT,
-        pdFALSE, pdTRUE, pdMS_TO_TICKS(JOIN_TIMEOUT_MS));
     ESP_ERROR_CHECK(esp_wifi_start());
 #if defined(CONFIG_ETH_DOWNLINK_W5500)
     // Single-core C3: disable WiFi power saving to reduce TX latency
