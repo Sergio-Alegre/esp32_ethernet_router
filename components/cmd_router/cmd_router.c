@@ -1881,33 +1881,59 @@ int dhcp_reserve(int argc, char **argv)
         return 1;
     }
 
-    int action; // 0 = add, 1 = del
+    int action; // 0 = add, 1 = del, 2 = isolate
     if (strcmp((char *)dhcp_reserve_args.add_del->sval[0], "add") == 0) {
         action = 0;
     } else if (strcmp((char *)dhcp_reserve_args.add_del->sval[0], "del") == 0) {
         action = 1;
+    } else if (strcmp((char *)dhcp_reserve_args.add_del->sval[0], "isolate") == 0) {
+        action = 2;
     } else {
-        printf("Must be 'add' or 'del'\n");
+        printf("Must be 'add', 'del' or 'isolate'\n");
         return 1;
     }
 
-    // Parse MAC address (AA:BB:CC:DD:EE:FF or AA-BB-CC-DD-EE-FF)
+    // Parse MAC address (AA:BB:CC:DD:EE:FF or AA-BB-CC-DD-EE-FF);
+    // 'isolate' also accepts a reservation name
     unsigned int mac[6];
+    uint8_t mac_bytes[6];
     const char *mac_str = dhcp_reserve_args.mac_addr->sval[0];
     if (sscanf(mac_str, "%02x:%02x:%02x:%02x:%02x:%02x",
-               &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]) != 6 &&
+               &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]) == 6 ||
         sscanf(mac_str, "%02x-%02x-%02x-%02x-%02x-%02x",
-               &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]) != 6) {
+               &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]) == 6) {
+        for (int i = 0; i < 6; i++) {
+            mac_bytes[i] = (uint8_t)mac[i];
+        }
+    } else if (action == 2 && resolve_device_name_to_mac(mac_str, mac_bytes)) {
+        // Resolved from reservation name
+    } else {
         printf("Invalid MAC address format. Use AA:BB:CC:DD:EE:FF\n");
         return 1;
     }
 
-    uint8_t mac_bytes[6];
-    for (int i = 0; i < 6; i++) {
-        mac_bytes[i] = (uint8_t)mac[i];
-    }
+    if (action == 2) {
+        const char *level = dhcp_reserve_args.ip_addr->count > 0 ? dhcp_reserve_args.ip_addr->sval[0] : "";
+        uint8_t iso;
+        if (strcmp(level, "on") == 0) {
+            iso = DHCP_ISOLATION_LAN;
+        } else if (strcmp(level, "off") == 0) {
+            iso = DHCP_ISOLATION_OFF;
+        } else {
+            printf("Usage: dhcp_reserve isolate <mac|name> <on|off>\n");
+            return 1;
+        }
 
-    if (action == 0) {
+        esp_err_t err = set_dhcp_reservation_isolation(mac_bytes, iso);
+        if (err == ESP_ERR_NOT_FOUND) {
+            printf("No DHCP reservation for this MAC. Add one first with 'dhcp_reserve add'\n");
+            return 1;
+        } else if (err != ESP_OK) {
+            printf("Failed to store isolation setting\n");
+            return 1;
+        }
+        printf("LAN isolation %s\n", iso ? "enabled (Internet only)" : "disabled");
+    } else if (action == 0) {
         // Parse IP address
         uint32_t ip = esp_ip4addr_aton((char *)dhcp_reserve_args.ip_addr->sval[0]);
         if (ip == IPADDR_NONE) {
@@ -1956,15 +1982,15 @@ int dhcp_reserve(int argc, char **argv)
 
 static void register_dhcp_reserve(void)
 {
-    dhcp_reserve_args.add_del = arg_str1(NULL, NULL, "[add|del]", "add or delete");
-    dhcp_reserve_args.mac_addr = arg_str1(NULL, NULL, "<mac>", "MAC address (AA:BB:CC:DD:EE:FF)");
-    dhcp_reserve_args.ip_addr = arg_str0(NULL, NULL, "<ip>", "IP address (required for add)");
+    dhcp_reserve_args.add_del = arg_str1(NULL, NULL, "[add|del|isolate]", "add, delete, or set LAN isolation");
+    dhcp_reserve_args.mac_addr = arg_str1(NULL, NULL, "<mac>", "MAC address (AA:BB:CC:DD:EE:FF); isolate also accepts a reservation name");
+    dhcp_reserve_args.ip_addr = arg_str0(NULL, NULL, "<ip|on|off>", "IP address (add) or on/off (isolate)");
     dhcp_reserve_args.name = arg_str0("-n", "--name", "<name>", "optional device name");
     dhcp_reserve_args.end = arg_end(4);
 
     const esp_console_cmd_t cmd = {
         .command = "dhcp_reserve",
-        .help = "Add/delete DHCP reservation by MAC",
+        .help = "Add/delete DHCP reservation by MAC, or restrict a reserved client to Internet-only (isolate)",
         .hint = NULL,
         .func = &dhcp_reserve,
         .argtable = &dhcp_reserve_args

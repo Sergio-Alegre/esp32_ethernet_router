@@ -4,6 +4,7 @@
  * with optional device names for user-friendly identification.
  */
 
+#include <stdatomic.h>
 #include <string.h>
 #include <strings.h>
 #include "esp_log.h"
@@ -18,6 +19,23 @@
 #define DHCP_RES_SIZE (sizeof(struct dhcp_reservation_entry) * MAX_DHCP_RESERVATIONS)
 
 static const char *TAG = "dhcp_mgr";
+
+// Count of isolated reservations, read lock-free by the ETH input hook
+static atomic_int isolated_count;
+
+static void recount_isolated(void) {
+    int n = 0;
+    for (int i = 0; i < MAX_DHCP_RESERVATIONS; i++) {
+        if (dhcp_reservations[i].valid && dhcp_reservations[i].isolation) {
+            n++;
+        }
+    }
+    atomic_store(&isolated_count, n);
+}
+
+int dhcp_isolated_count(void) {
+    return atomic_load(&isolated_count);
+}
 
 esp_err_t get_dhcp_reservations() {
     esp_err_t err;
@@ -40,6 +58,7 @@ esp_err_t get_dhcp_reservations() {
         }
     }
     nvs_close(nvs);
+    recount_isolated();
 
     return err;
 }
@@ -56,6 +75,9 @@ void print_dhcp_reservations() {
             printf(IPSTR, IP2STR(&addr));
             if (dhcp_reservations[i].name[0] != '\0') {
                 printf(" (%s)", dhcp_reservations[i].name);
+            }
+            if (dhcp_reservations[i].isolation) {
+                printf(" [isolated, %lu drops]", (unsigned long)get_isolation_drops(i));
             }
             printf("\n");
         }
@@ -133,6 +155,7 @@ esp_err_t add_dhcp_reservation(const uint8_t *mac, uint32_t ip, const char *name
             } else {
                 dhcp_reservations[i].name[0] = '\0';
             }
+            dhcp_reservations[i].isolation = DHCP_ISOLATION_OFF;
             dhcp_reservations[i].valid = 1;
             goto save;
         }
@@ -152,6 +175,8 @@ esp_err_t del_dhcp_reservation(const uint8_t *mac) {
         if (dhcp_reservations[i].valid &&
             memcmp(dhcp_reservations[i].mac, mac, 6) == 0) {
             dhcp_reservations[i].valid = 0;
+            dhcp_reservations[i].isolation = DHCP_ISOLATION_OFF;
+            recount_isolated();
 
             esp_err_t err = set_config_param_blob("dhcp_res", dhcp_reservations, DHCP_RES_SIZE);
             if (err == ESP_OK) {
@@ -163,11 +188,32 @@ esp_err_t del_dhcp_reservation(const uint8_t *mac) {
     return ESP_OK;
 }
 
+esp_err_t set_dhcp_reservation_isolation(const uint8_t *mac, uint8_t level) {
+    for (int i = 0; i < MAX_DHCP_RESERVATIONS; i++) {
+        if (dhcp_reservations[i].valid &&
+            memcmp(dhcp_reservations[i].mac, mac, 6) == 0) {
+            dhcp_reservations[i].isolation = level ? DHCP_ISOLATION_LAN : DHCP_ISOLATION_OFF;
+            recount_isolated();
+
+            esp_err_t err = set_config_param_blob("dhcp_res", dhcp_reservations, DHCP_RES_SIZE);
+            if (err == ESP_OK) {
+                ESP_LOGI(TAG, "LAN isolation %s for %02X:%02X:%02X:%02X:%02X:%02X",
+                         level ? "enabled" : "disabled",
+                         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+            }
+            return err;
+        }
+    }
+    return ESP_ERR_NOT_FOUND;
+}
+
 esp_err_t clear_all_dhcp_reservations() {
     // Clear all reservation entries
     for (int i = 0; i < MAX_DHCP_RESERVATIONS; i++) {
         dhcp_reservations[i].valid = 0;
+        dhcp_reservations[i].isolation = DHCP_ISOLATION_OFF;
     }
+    recount_isolated();
 
     // Save cleared table to NVS
     esp_err_t err = set_config_param_blob("dhcp_res", dhcp_reservations, DHCP_RES_SIZE);

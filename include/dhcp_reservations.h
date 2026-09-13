@@ -16,12 +16,22 @@ extern "C" {
 #define MAX_DHCP_RESERVATIONS (AP_MAX_CONNECTIONS + 2)
 #define DHCP_RESERVATION_NAME_LEN 32
 
+/* Isolation levels for a reservation (enforced by source MAC in the ETH input hook) */
+#define DHCP_ISOLATION_OFF 0
+#define DHCP_ISOLATION_LAN 1   /* Internet only: no private ranges, multicast/broadcast or router services */
+
 struct dhcp_reservation_entry {
     uint8_t mac[6];
     uint32_t ip;
     char name[DHCP_RESERVATION_NAME_LEN];
     uint8_t valid;
+    uint8_t isolation;   /* DHCP_ISOLATION_*; uses former tail padding, so the NVS blob size is unchanged */
 };
+
+#ifndef __cplusplus
+/* The "dhcp_res" NVS blob is length-checked on load; growing the struct would discard stored reservations */
+_Static_assert(sizeof(struct dhcp_reservation_entry) == 48, "dhcp_reservation_entry size changed (NVS blob layout)");
+#endif
 
 /**
  * @brief Information about a connected client
@@ -53,6 +63,25 @@ esp_err_t del_dhcp_reservation(const uint8_t *mac);
 esp_err_t clear_all_dhcp_reservations(void);
 uint32_t lookup_dhcp_reservation(const uint8_t *mac);
 bool is_ip_reserved_for_other(uint32_t ip, const uint8_t *mac);
+
+/**
+ * @brief Set the isolation level of an existing reservation and persist it
+ * @param mac MAC address of the reservation (6 bytes)
+ * @param level DHCP_ISOLATION_OFF or DHCP_ISOLATION_LAN
+ * @return ESP_OK, ESP_ERR_NOT_FOUND if no reservation for the MAC, or NVS error
+ */
+esp_err_t set_dhcp_reservation_isolation(const uint8_t *mac, uint8_t level);
+
+/**
+ * @brief Number of valid reservations with isolation enabled (hot-path fast check)
+ */
+int dhcp_isolated_count(void);
+
+/**
+ * @brief Packets dropped by LAN isolation for a reservation slot (RAM only, reset on boot)
+ * @param idx Index into dhcp_reservations[]
+ */
+uint32_t get_isolation_drops(int idx);
 
 /**
  * @brief Look up device name by IP address from DHCP reservations

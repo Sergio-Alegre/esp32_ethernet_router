@@ -18,6 +18,7 @@ All settings are managed through a browser-based web interface or via the serial
 
 - **Home lab gateway** — connect a wired lab segment to a WiFi network without a dedicated router
 - **Isolated test network** — provide controlled Internet access to an IoT net segment protected by ACLs
+- **Smart TV quarantine** — give a device (e.g. network-scanning smart TV) Internet access while keeping it away from your home LAN
 - **Transparent monitoring tap** — capture and inspect all traffic on the wired segment in Wireshark without any client changes
 - **WPA2-Enterprise bridge** — give plain devices access to a corporate WiFi that requires 802.1X authentication
 - **VPN Gateway** — connect a LAN segment upstream via a protected VPN tunnel
@@ -34,6 +35,7 @@ All settings are managed through a browser-based web interface or via the serial
 - NAT (NAPT) — enable or disable per configuration; when disabled the Ethernet segment is routed
 - DHCP server on Ethernet — enable or disable independently of NAT
 - DHCP reservations — assign fixed IPs to clients by MAC address
+- Client LAN isolation — restrict a reserved client to Internet-only access (no home LAN, private ranges or router services)
 - Port forwarding (DNAT) — forward external TCP/UDP ports to internal hosts
 - Stateless packet firewall with four directional ACL lists, 16 rules each
 - Packet capture to Wireshark over TCP (PCAP streaming, ACL-triggered or promiscuous)
@@ -175,7 +177,7 @@ Monitoring and diagnostics tools, password-protected.
 Visible only when DHCP server or NAT is enabled.
 
 - *Connected Clients* — live DHCP lease table (shown when DHCP server is enabled)
-- *DHCP Reservations* — add or remove static MAC-to-IP assignments (shown when DHCP server is enabled)
+- *DHCP Reservations* — add or remove static MAC-to-IP assignments; toggle LAN isolation per reservation (**Isolate** / **Unisolate** button, drop counter in the *Isolated* column, or the *Isolate from LAN* checkbox when adding) (shown when DHCP server is enabled)
 - *Port Forwarding* — add or remove TCP/UDP port forward rules (shown when NAT is enabled)
 
 **Firewall**
@@ -242,7 +244,37 @@ dhcp_reserve add <AA:BB:CC:DD:EE:FF> <ip> [-n <name>]
 dhcp_reserve del <AA:BB:CC:DD:EE:FF>
 ```
 
-Reservations persist in NVS and are shown in the Mappings page. Up to 16 reservations are supported.
+Reservations persist in NVS and are shown in the Mappings page. Up to 10 reservations are supported.
+
+### Client LAN Isolation
+
+Some devices (e.g. smart TVs, which have been reported to sweep the local network and upload what they find) should reach the Internet but nothing else. A DHCP reservation can be marked **isolated**:
+
+```
+dhcp_reserve add AA:BB:CC:DD:EE:FF 192.168.4.10 -n device_name
+dhcp_reserve isolate device_name on             # accepts a MAC address or reservation name
+dhcp_reserve isolate device_name off
+```
+
+In the web interface, use the **Isolate** / **Unisolate** button in the reservations table on the Mappings page, or tick *Isolate from LAN* when adding a reservation. The setting persists in NVS and takes effect immediately.
+
+For IPv4 packets from an isolated client, the router **drops** anything addressed to:
+
+- private and special ranges: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10` (CGNAT, Tailscale), `169.254.0.0/16`
+- multicast (`224.0.0.0/4`), broadcast (`255.255.255.255`, the downlink subnet broadcast)
+- the router itself (web interface, remote console, …)
+
+**Allowed** are Internet destinations, DHCP to the router, and DNS (port 53) to the DNS server handed out by the router's DHCP server — even when that server is on your home LAN.
+
+Matching is done by **source MAC address**, so configuring a static IP on the client does not bypass it. Isolation is checked before the firewall, so an ACL `allow` rule cannot re-open LAN access. Dropped packets are counted per reservation (`show mappings`, *Isolated* column in the web interface) and logged at most once every 10 s.
+
+Recommended setup and limitations:
+
+- Connect the isolated device **alone** to the Ethernet port (directly, or via a switch with nothing else on it). Traffic between devices on the same switch never passes through the router and cannot be filtered.
+- Broadcast and multicast discovery (ARP, mDNS, SSDP) is never forwarded to the WiFi uplink anyway; isolation additionally blocks direct scans of the home subnet, directed broadcasts such as `192.168.1.255`, and access to the router.
+- The router cannot stop a device from scanning with its own WiFi or Bluetooth radio — disable those in the device's settings and forget any saved home WiFi network.
+- Casting from phones on the home network (AirPlay, Chromecast, DLNA) to an isolated device will not work.
+- Isolation is inactive in Ethernet uplink mode (`set_eth_dhcpc on`).
 
 ### Port Forwarding
 
@@ -296,6 +328,8 @@ The firewall filters packets at four points in the data path:
 | `to_eth` | outbound on Ethernet | packets going to LAN clients |
 
 Rules are evaluated in order; the first match wins. Unmatched packets are allowed by default.
+
+To restrict a single client to Internet-only access, [Client LAN Isolation](#client-lan-isolation) is simpler than hand-written ACL rules: it matches by MAC address and does not use ACL rule slots.
 
 ### Rule Syntax (CLI)
 
@@ -558,6 +592,7 @@ Connect via serial at 115200 bps, or via the remote console.
 | `show route` | Routing table: interfaces, connected + default routes |
 | `dhcp_reserve add <mac> <ip> [-n <name>]` | Add DHCP reservation |
 | `dhcp_reserve del <mac>` | Remove DHCP reservation |
+| `dhcp_reserve isolate <mac\|name> <on\|off>` | Restrict a reserved client to Internet-only access (LAN isolation) |
 | `portmap add <TCP\|UDP> <ext_port> <int_ip> <int_port>` | Add port forward rule |
 | `portmap del <TCP\|UDP> <ext_port>` | Remove port forward rule |
 

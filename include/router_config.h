@@ -59,6 +59,10 @@ extern uint8_t eth_dhcpc_enabled;
 // Ethernet link state (true = link up, false = link down)
 extern bool eth_link_up;
 
+// DNS server advertised to Ethernet DHCP clients (network byte order, 0 = unknown).
+// LAN-isolated clients may still reach it on port 53.
+extern uint32_t eth_advertised_dns;
+
 // Byte counting functions
 void init_byte_counter(void);
 uint64_t get_sta_bytes_sent(void);

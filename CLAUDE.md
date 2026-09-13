@@ -165,16 +165,34 @@ struct dhcp_reservation_entry {
     uint32_t ip;                                 // Reserved IP address
     char name[DHCP_RESERVATION_NAME_LEN];        // Optional device name (32 chars)
     uint8_t valid;                               // Entry active flag
+    uint8_t isolation;                           // DHCP_ISOLATION_OFF / DHCP_ISOLATION_LAN
 };
 ```
+`isolation` occupies the former tail padding — `sizeof` stays 48 (guarded by `_Static_assert`), so existing NVS blobs load unchanged with isolation off.
 
 **Functions** (`dhcp_manager.c`):
-- `add_dhcp_reservation(mac, ip, name)` - Add/update reservation
+- `add_dhcp_reservation(mac, ip, name)` - Add/update reservation (update keeps `isolation`)
 - `del_dhcp_reservation(mac)` - Remove reservation by MAC
 - `lookup_dhcp_reservation(mac)` - Get reserved IP for MAC (returns 0 if none)
+- `set_dhcp_reservation_isolation(mac, level)` - Set isolation on an existing reservation (`ESP_ERR_NOT_FOUND` if none)
+- `dhcp_isolated_count()` - Atomic count of isolated reservations (hook fast path)
 - `print_dhcp_reservations()` - Print all reservations to console
 
 **Storage:** Persisted in NVS as blob under key `"dhcp_res"`
+
+### Client LAN Isolation
+Per-reservation "Internet only" mode, intended for devices that scan the local network (e.g. smart TVs).
+Enforced in `isolation_should_drop()` (`main/netif_hooks.c`) at the very top of `dl_netif_input_hook`, before
+the ACL, so ACL allow rules cannot re-open LAN access. Matching is by **source MAC**, so a static IP does not bypass it.
+
+For IPv4 from an isolated MAC, packets are dropped when the destination is 10/8, 172.16/12, 192.168/16,
+100.64/10, 169.254/16, 224/4, 255.255.255.255, the router IP or the downlink /24 broadcast — except UDP 67
+to the router/broadcast (DHCP) and port 53 to `eth_advertised_dns` (the DNS server handed out via DHCP, cached
+where `esp_netif_set_dns_info(ethNetif, ...)` is called). Non-IPv4 (ARP) passes. Only the input direction is
+filtered: NAT blocks unsolicited inbound, and replies from the isolated client to LAN hosts are dropped.
+Inactive in Ethernet uplink mode (`eth_dhcpc_enabled`). Drop counters are RAM-only (`get_isolation_drops(idx)`),
+with a rate-limited (10 s) `ESP_LOGW`. Traffic between devices on the same Ethernet switch never reaches the ESP32
+and cannot be filtered.
 
 **Note:** MAC blocking (IP=0 reservations) has been removed — it is not effective on Ethernet since wired clients can bypass DHCP with static IPs.
 
@@ -355,6 +373,7 @@ portmap add TCP <ext_port> <int_ip> <int_port>   # Add port mapping (only when N
 portmap del TCP <ext_port>                       # Delete port mapping
 dhcp_reserve add <mac> <ip> [-n <name>]          # Add DHCP reservation (only when DHCP server enabled)
 dhcp_reserve del <mac>                           # Delete DHCP reservation
+dhcp_reserve isolate <mac|name> <on|off>         # Internet-only mode for a reserved client (blocks LAN/private ranges/router)
 set_web_password <password>                      # Set web interface password (empty to disable)
 web_ui enable                                    # Enable web interface (after reboot)
 web_ui disable                                   # Disable web interface (after reboot)
@@ -435,7 +454,7 @@ netif_linkoutput_hook(netif, pbuf) // Counts sta_bytes_sent
 static netif_input_fn original_dl_netif_input;
 static netif_linkoutput_fn original_dl_netif_linkoutput;
 
-dl_netif_input_hook(pbuf, netif)      // ACL, VPN kill switch, PMTU, MSS clamp, per-client stats, NetFlow ingress, PCAP
+dl_netif_input_hook(pbuf, netif)      // LAN isolation, ACL, VPN kill switch, PMTU, MSS clamp, per-client stats, NetFlow ingress, PCAP
 dl_netif_linkoutput_hook(netif, pbuf) // ACL, MSS clamp, per-client stats, NetFlow egress, PCAP
 ```
 

@@ -103,6 +103,7 @@ document.getElementById('dhcp_mac').scrollIntoView({behavior: 'smooth', block: '
 <th>MAC Address</th>\
 <th>IP Address</th>\
 <th>Name</th>\
+<th title='Internet only: no access to LAN, other private networks or router services'>Isolated</th>\
 <th>Action</th>\
 </tr>\
 </thead>\
@@ -118,6 +119,7 @@ document.getElementById('dhcp_mac').scrollIntoView({behavior: 'smooth', block: '
 <tr><td>MAC Address</td><td><input type='text' name='dhcp_mac' id='dhcp_mac' placeholder='AA:BB:CC:DD:EE:FF'/></td></tr>\
 <tr><td>IP Address</td><td><input type='text' name='dhcp_ip' id='dhcp_ip' placeholder='192.168.4.100'/></td></tr>\
 <tr><td>Name (optional)</td><td><input type='text' name='dhcp_name' id='dhcp_name' placeholder='My Device'/></td></tr>\
+<tr><td>Isolate from LAN</td><td><label><input type='checkbox' name='dhcp_iso' value='1'/> Internet only</label></td></tr>\
 <tr><td></td><td><input type='submit' name='dhcp_action' value='Add Reservation' class='ok-button'/></td></tr>\
 </table>\
 </form>\

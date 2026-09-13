@@ -149,6 +149,7 @@ uint8_t led_toggle = 0;  // Shared toggle state for packet-driven LED flicker
 
 uint32_t my_ip;
 uint32_t my_ap_ip;
+uint32_t eth_advertised_dns = 0;
 
 struct portmap_table_entry portmap_tab[IP_PORTMAP_MAX];
 struct dhcp_reservation_entry dhcp_reservations[MAX_DHCP_RESERVATIONS];
@@ -426,9 +427,11 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
                 dns.ip.u_addr.ip4.addr = esp_ip4addr_aton(eff_dns);
                 dns.ip.type = ESP_IPADDR_TYPE_V4;
                 esp_netif_set_dns_info(ethNetif, ESP_NETIF_DNS_MAIN, &dns);
+                eth_advertised_dns = dns.ip.u_addr.ip4.addr;
                 ESP_LOGI(TAG, "ETH DNS set to %s", eff_dns);
             } else if (esp_netif_get_dns_info(wifiSTA, ESP_NETIF_DNS_MAIN, &dns) == ESP_OK) {
                 esp_netif_set_dns_info(ethNetif, ESP_NETIF_DNS_MAIN, &dns);
+                eth_advertised_dns = dns.ip.u_addr.ip4.addr;
                 ESP_LOGI(TAG, "set dns to:" IPSTR, IP2STR(&(dns.ip.u_addr.ip4)));
             }
         }
@@ -655,6 +658,7 @@ void router_init(const uint8_t* mac, const char* ssid, const char* ent_username,
         dnsserver.ip.u_addr.ip4.addr = esp_ip4addr_aton(dns_src);
         dnsserver.ip.type = ESP_IPADDR_TYPE_V4;
         esp_netif_set_dns_info(ethNetif, ESP_NETIF_DNS_MAIN, &dnsserver);
+        eth_advertised_dns = dnsserver.ip.u_addr.ip4.addr;
         ESP_LOGI(TAG, "Ethernet DHCP server enabled");
     } else {
         ESP_LOGI(TAG, "Ethernet DHCP server disabled");

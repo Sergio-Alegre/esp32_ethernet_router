@@ -1764,7 +1764,12 @@ static esp_err_t mappings_get_handler(httpd_req_t *req)
                                     preprocess_string(param3);
                                     name = param3;
                                 }
-                                add_dhcp_reservation(mac_bytes, ip, name);
+                                if (add_dhcp_reservation(mac_bytes, ip, name) == ESP_OK) {
+                                    /* Form checkbox is authoritative: unchecked clears isolation on update */
+                                    bool iso = httpd_query_key_value(buf, "dhcp_iso", param4, sizeof(param4)) == ESP_OK &&
+                                               strcmp(param4, "1") == 0;
+                                    set_dhcp_reservation_isolation(mac_bytes, iso ? DHCP_ISOLATION_LAN : DHCP_ISOLATION_OFF);
+                                }
                                 ESP_LOGI(TAG, "Added DHCP reservation: %s -> %s", param1, param2);
                             }
                         }
@@ -1800,6 +1805,22 @@ static esp_err_t mappings_get_handler(httpd_req_t *req)
                     }
                     del_dhcp_reservation(mac_bytes);
                     ESP_LOGI(TAG, "Deleted DHCP reservation: %s", param1);
+                }
+            }
+
+            /* Check for LAN isolation toggle */
+            if (httpd_query_key_value(buf, "iso_mac", param1, sizeof(param1)) == ESP_OK &&
+                httpd_query_key_value(buf, "iso", param2, sizeof(param2)) == ESP_OK) {
+                preprocess_string(param1);
+                unsigned int mac[6];
+                if (sscanf(param1, "%02x:%02x:%02x:%02x:%02x:%02x",
+                           &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]) == 6) {
+                    uint8_t mac_bytes[6];
+                    for (int i = 0; i < 6; i++) {
+                        mac_bytes[i] = (uint8_t)mac[i];
+                    }
+                    set_dhcp_reservation_isolation(mac_bytes,
+                        strcmp(param2, "1") == 0 ? DHCP_ISOLATION_LAN : DHCP_ISOLATION_OFF);
                 }
             }
 
@@ -2031,12 +2052,24 @@ static esp_err_t mappings_get_handler(httpd_req_t *req)
                 addr.addr = dhcp_reservations[i].ip;
                 snprintf(ip_col, sizeof(ip_col), IPSTR, IP2STR(&addr));
 
+                bool isolated = dhcp_reservations[i].isolation != DHCP_ISOLATION_OFF;
+                char iso_col[40];
+                if (isolated) {
+                    snprintf(iso_col, sizeof(iso_col), "Yes (%lu drops)",
+                             (unsigned long)get_isolation_drops(i));
+                } else {
+                    snprintf(iso_col, sizeof(iso_col), "No");
+                }
+
                 snprintf(row, sizeof(row),
                     "<tr>"
                     "<td>%02X:%02X:%02X:%02X:%02X:%02X</td>"
                     "<td>%s</td>"
                     "<td>%s</td>"
+                    "<td>%s</td>"
                     "<td style='white-space:nowrap'>"
+                    "<a href='/mappings?iso_mac=%02X:%02X:%02X:%02X:%02X:%02X&amp;iso=%d' class='wake-button'>%s</a>"
+                    " "
                     "<a href='/mappings?wol_mac=%02X:%02X:%02X:%02X:%02X:%02X' class='wake-button'>Wake</a>"
                     " "
                     "<a href='/mappings?del_dhcp_mac=%02X:%02X:%02X:%02X:%02X:%02X' class='red-button'>Delete</a>"
@@ -2047,6 +2080,12 @@ static esp_err_t mappings_get_handler(httpd_req_t *req)
                     dhcp_reservations[i].mac[4], dhcp_reservations[i].mac[5],
                     ip_col,
                     dhcp_reservations[i].name[0] ? dhcp_reservations[i].name : "-",
+                    iso_col,
+                    dhcp_reservations[i].mac[0], dhcp_reservations[i].mac[1],
+                    dhcp_reservations[i].mac[2], dhcp_reservations[i].mac[3],
+                    dhcp_reservations[i].mac[4], dhcp_reservations[i].mac[5],
+                    isolated ? 0 : 1,
+                    isolated ? "Unisolate" : "Isolate",
                     dhcp_reservations[i].mac[0], dhcp_reservations[i].mac[1],
                     dhcp_reservations[i].mac[2], dhcp_reservations[i].mac[3],
                     dhcp_reservations[i].mac[4], dhcp_reservations[i].mac[5],
@@ -2060,7 +2099,7 @@ static esp_err_t mappings_get_handler(httpd_req_t *req)
 
         if (!has_reservations) {
             SEND_CHUNK(req,
-                "<tr><td colspan='4' style='text-align:center; color:#888;'>No DHCP reservations configured</td></tr>",
+                "<tr><td colspan='5' style='text-align:center; color:#888;'>No DHCP reservations configured</td></tr>",
                 HTTPD_RESP_USE_STRLEN);
         }
 

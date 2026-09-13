@@ -21,6 +21,7 @@
 #include "lwip/inet_chksum.h"
 #include "acl.h"
 #include "client_stats.h"
+#include "dhcp_reservations.h"
 #include "pcap_capture.h"
 #include "netflow.h"
 #include "router_config.h"
@@ -474,9 +475,99 @@ static void send_icmp_frag_needed(struct pbuf *p, struct netif *netif, uint16_t 
     pbuf_free(resp);
 }
 
+// LAN isolation: per-reservation drop counters (RAM only, index = reservation slot)
+static uint32_t iso_drops[MAX_DHCP_RESERVATIONS];
+static int64_t iso_last_log_time = 0;
+#define ISO_LOG_INTERVAL_US (10 * 1000000LL)
+
+uint32_t get_isolation_drops(int idx) {
+    if (idx < 0 || idx >= MAX_DHCP_RESERVATIONS) return 0;
+    return iso_drops[idx];
+}
+
+// True if dest (network byte order) is a private, link-local, CGNAT, multicast
+// or broadcast address, or the router itself
+static inline IRAM_ATTR bool is_lan_destination(uint32_t dest) {
+    uint32_t d = lwip_ntohl(dest);
+    return (d & 0xFF000000UL) == 0x0A000000UL      // 10.0.0.0/8
+        || (d & 0xFFF00000UL) == 0xAC100000UL      // 172.16.0.0/12
+        || (d & 0xFFFF0000UL) == 0xC0A80000UL      // 192.168.0.0/16
+        || (d & 0xFFC00000UL) == 0x64400000UL      // 100.64.0.0/10 (CGNAT, Tailscale)
+        || (d & 0xFFFF0000UL) == 0xA9FE0000UL      // 169.254.0.0/16
+        || (d & 0xF0000000UL) == 0xE0000000UL      // 224.0.0.0/4 multicast
+        || d == 0xFFFFFFFFUL                        // limited broadcast
+        || dest == my_ap_ip                         // router itself
+        || d == (lwip_ntohl(my_ap_ip) | 0xFFUL);    // downlink /24 broadcast
+}
+
+// Drop IPv4 packets from LAN-isolated reservations (matched by source MAC, so a
+// static IP on the client does not bypass it) that target anything but the
+// Internet. DHCP to the router and DNS to the advertised server stay allowed.
+// Only the input direction is filtered: NAT blocks unsolicited inbound, and any
+// reply the isolated client would send to a LAN host is dropped here.
+static IRAM_ATTR bool isolation_should_drop(struct pbuf *p) {
+    if (dhcp_isolated_count() == 0 || eth_dhcpc_enabled) return false;
+    if (p == NULL || p->len < 14 + IP_HLEN) return false;
+
+    const uint8_t *frame = (const uint8_t *)p->payload;
+    if (frame[12] != 0x08 || frame[13] != 0x00) return false;   // IPv4 only
+
+    int slot = -1;
+    for (int i = 0; i < MAX_DHCP_RESERVATIONS; i++) {
+        if (dhcp_reservations[i].valid && dhcp_reservations[i].isolation &&
+            memcmp(dhcp_reservations[i].mac, frame + 6, 6) == 0) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) return false;
+
+    const struct ip_hdr *iphdr = (const struct ip_hdr *)(frame + 14);
+    if (IPH_V(iphdr) != 4) return false;
+
+    uint32_t dest = iphdr->dest.addr;
+    if (!is_lan_destination(dest)) return false;
+
+    uint8_t proto = IPH_PROTO(iphdr);
+    uint16_t ihl = IPH_HL(iphdr) * 4;
+    bool first_fragment = (IPH_OFFSET(iphdr) & PP_HTONS(IP_OFFMASK)) == 0;
+    if ((proto == PROTO_UDP || proto == PROTO_TCP) && first_fragment &&
+        ihl >= IP_HLEN && p->len >= 14 + ihl + 4) {
+        const uint8_t *l4 = frame + 14 + ihl;
+        uint16_t dport = ((uint16_t)l4[2] << 8) | l4[3];
+        if (proto == PROTO_UDP && dport == 67 &&
+            (dest == my_ap_ip || dest == 0xFFFFFFFFUL)) {
+            return false;   // DHCP discover/request/renew
+        }
+        if (dport == 53 && eth_advertised_dns != 0 && dest == eth_advertised_dns) {
+            return false;   // DNS to the server handed out via DHCP
+        }
+    }
+
+    iso_drops[slot]++;
+
+    int64_t now = esp_timer_get_time();
+    if (now - iso_last_log_time >= ISO_LOG_INTERVAL_US) {
+        iso_last_log_time = now;
+        ip4_addr_t daddr;
+        daddr.addr = dest;
+        ESP_LOGW(TAG, "LAN isolation: dropped %02X:%02X:%02X:%02X:%02X:%02X -> " IPSTR " (proto %u)",
+                 frame[6], frame[7], frame[8], frame[9], frame[10], frame[11],
+                 IP2STR(&daddr), proto);
+    }
+    return true;
+}
+
 // Downlink netif hook functions (for PCAP capture and ACL)
 static IRAM_ATTR err_t dl_netif_input_hook(struct pbuf *p, struct netif *netif) {
     bool is_acl_monitored = false;
+
+    // LAN isolation for flagged DHCP reservations; runs before the ACL so an
+    // ACL allow rule cannot re-open LAN access for an isolated client
+    if (isolation_should_drop(p)) {
+        pbuf_free(p);
+        return ERR_OK;
+    }
 
     // Check from_eth ACL (packets from Clients to ESP32)
     if (!acl_is_empty(ACL_FROM_ETH)) {
