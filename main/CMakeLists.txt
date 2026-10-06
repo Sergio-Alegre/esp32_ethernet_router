@@ -9,3 +9,8 @@ idf_component_register(SRCS "esp32_nat_router.c"
 
 # Performance optimization for the hot-path packet processing code
 target_compile_options(${COMPONENT_LIB} PRIVATE -O2)
+# Setup and event-handling files build for size; netif_hooks.c stays on -O2
+# because it sits on the packet path. Source-level COMPILE_OPTIONS are emitted
+# after the target options, so the later -Os wins for the listed files.
+set_source_files_properties(esp32_nat_router.c portmap.c dhcp_manager.c vpn_manager.c led_strip_status.c
+    PROPERTIES COMPILE_OPTIONS "-Os")

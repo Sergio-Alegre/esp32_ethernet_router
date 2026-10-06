@@ -1288,9 +1288,15 @@ static esp_err_t config_get_handler(httpd_req_t *req)
                 if (httpd_query_key_value(buf, "password", param2, sizeof(param2)) == ESP_OK) {
                     preprocess_string(param2);
 
-                    // Keep existing password if field was left empty
-                    if (strlen(param2) == 0) {
-                        strlcpy(param2, passwd, sizeof(param2));
+                    // "Open network" checkbox overrides password to empty
+                    {
+                        char open_val[4] = "";
+                        if (httpd_query_key_value(buf, "sta_open", open_val, sizeof(open_val)) == ESP_OK) {
+                            param2[0] = '\0';
+                        } else if (strlen(param2) == 0) {
+                            // Keep existing password if field was left empty
+                            strlcpy(param2, passwd, sizeof(param2));
+                        }
                     }
                     if (httpd_query_key_value(buf, "ent_username", param3, sizeof(param3)) == ESP_OK) {
                         ESP_LOGI(TAG, "Found URL query parameter => ent_username=%s", param3);
@@ -1571,9 +1577,9 @@ static esp_err_t config_get_handler(httpd_req_t *req)
     const char* rc_vpn_chk = (rc_config.bind & RC_BIND_VPN) ? "checked" : "";
 
     /* Reusable buffer for building sections.  Sized for the largest chunk
-     * (STA settings) once the escaped SSID / enterprise identity fields are
-     * accounted for as fixed-size stack buffers. */
-    char section[2816];
+     * (STA settings): its worst case is ~2890 bytes once the escaped SSID /
+     * enterprise identity fields are accounted for as fixed-size stack buffers. */
+    char section[3072];
 
     /* --- Begin chunked response --- */
 
@@ -1608,7 +1614,7 @@ static esp_err_t config_get_handler(httpd_req_t *req)
 
     /* Chunk 5: STA Settings */
     snprintf(section, sizeof(section), CONFIG_CHUNK_STA,
-        safe_ssid,
+        safe_ssid, (strlen(passwd) == 0) ? "checked" : "",
         safe_ent_username, safe_ent_identity,
         eap_method == 0 ? "selected" : "", eap_method == 1 ? "selected" : "",
         eap_method == 2 ? "selected" : "", eap_method == 3 ? "selected" : "",

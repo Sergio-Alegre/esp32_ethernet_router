@@ -158,7 +158,7 @@ Shows current connection state: uplink SSID, uplink IP, signal strength, Etherne
 Grouped into sections. Changes trigger a reboot to apply.
 
 - *Ethernet Subnet Settings* — LAN IP address, DNS server override, NAT toggle (enabled / disabled), DHCP server toggle (enabled / disabled)
-- *WiFi Settings (Uplink)* — SSID, password, WPA2-Enterprise credentials (username, identity, EAP method, TTLS phase 2, certificate options), MAC address override
+- *WiFi Settings (Uplink)* — SSID, password (left empty keeps the current one; tick *Open network* to connect to an AP without a password), WPA2-Enterprise credentials (username, identity, EAP method, TTLS phase 2, certificate options), MAC address override
 - *Static IP Settings* — static IP, subnet mask, gateway for the WiFi uplink; leave empty to use DHCP
 - *Remote Console* — enable/disable, port, interface binding (ETH/STA/VPN), idle timeout
 - *Device Management* — OTA firmware upload, factory reset
@@ -211,7 +211,7 @@ set_tx_power <dBm>
 set_wifi_country <CC>
 ```
 
-The router connects to the upstream WiFi network and reconnects immediately on disconnect. WPA2-Enterprise (PEAP/TTLS/TLS) can be configured in the web interface.
+The router connects to the upstream WiFi network and reconnects immediately on disconnect. For an open network, pass an empty password (`set_sta <ssid> ""`) or tick *Open network (no password)* in the web interface. WPA2-Enterprise (PEAP/TTLS/TLS) can be configured in the web interface.
 
 ### Ethernet Downlink
 
@@ -746,11 +746,13 @@ idf.py -B build_w5500_c3 menuconfig
 
 | File | Purpose |
 |------|---------|
-| `sdkconfig.defaults` | Shared base config (IP forwarding, NAPT, DHCP server) |
+| `sdkconfig.defaults` | Shared base config (IP forwarding, NAPT, DHCP server, flash-size savings) |
 | `sdkconfig.defaults.wt32_eth_sta_uplink` | WT32-ETH01 Ethernet PHY GPIOs (LAN8720) |
 | `sdkconfig.defaults.w5500_c3` | W5500 SPI pins, ESP32-C3 specifics, IRAM/perf tuning |
 
 Each variant uses a separate sdkconfig file (`sdkconfig` vs `sdkconfig.w5500_c3`) so both can coexist in the same project directory.
+
+Both images must fit the 1536 KB OTA app slot; the C3 build is the tighter one. To save flash, the base config uses silent assertions (no file/expression strings) and disables the error-name table, so `esp_err_to_name()` and log messages show numeric error codes (e.g. `0x101` instead of `ESP_ERR_NO_MEM`). Setup and event-handling sources in `main/` are compiled with `-Os`; `netif_hooks.c` stays on `-O2` because it is on the packet path. Note that `sdkconfig.defaults` only fills in values missing from an existing `sdkconfig` — delete the generated sdkconfig file (or the affected lines) to pick up changed defaults.
 
 OTA updates are also supported through the web interface (Device Management section) with partition rollback on failed updates.
 
