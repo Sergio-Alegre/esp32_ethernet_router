@@ -186,7 +186,7 @@ Manage the four ACL lists. Add rules by selecting direction, protocol, source ad
 
 **VPN**
 
-WireGuard peer configuration: private key, peer public key, optional preshared key, endpoint, tunnel IP, keepalive, kill switch, and routing mode.
+WireGuard peer configuration: private key, peer public key, optional preshared key, endpoint, tunnel IP, keepalive, tunnel MTU, kill switch, and routing mode.
 
 **WiFi Scan**
 
@@ -409,6 +409,7 @@ set_vpn port <udp_port>
 set_vpn address <tunnel_ip>
 set_vpn netmask <netmask>
 set_vpn keepalive <seconds>
+set_vpn mtu <1280-1420>
 set_vpn killswitch <on|off>
 set_vpn route_all <on|off>
 set_vpn <on|off>
@@ -621,6 +622,7 @@ Lists: `to_esp`, `from_esp`, `from_eth`, `to_eth`
 | `set_vpn address <ip>` | Tunnel IP address |
 | `set_vpn netmask <mask>` | Tunnel subnet mask |
 | `set_vpn keepalive <seconds>` | Persistent keepalive interval |
+| `set_vpn mtu <1280-1420>` | Tunnel MTU (default 1420; lower for CGNAT/PPPoE/LTE uplinks) |
 | `set_vpn killswitch <on\|off>` | Block traffic when VPN is down |
 | `set_vpn route_all <on\|off>` | Route all traffic through VPN |
 
