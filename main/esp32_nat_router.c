@@ -1066,6 +1066,11 @@ void app_main(void)
     if (eth_nat_enabled) {
         ip_napt_enable(my_ap_ip, 1);
         ESP_LOGI(TAG, "NAT is enabled");
+        // The NAPT portmap table is only allocated by ip_napt_enable(); an earlier
+        // apply from the STA GOT_IP event is a silent no-op if WiFi won the race.
+        // Delete first: ip_portmap_add() duplicates entries that already exist.
+        delete_portmap_tab();
+        apply_portmap_tab();
     } else {
         ESP_LOGI(TAG, "NAT is disabled (routed mode)");
     }

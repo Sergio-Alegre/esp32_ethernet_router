@@ -30,6 +30,7 @@ esp_err_t apply_portmap_tab() {
             } else {
                 bind_ip = my_ip;
             }
+            if (bind_ip == 0) continue;  // uplink IP not ready; GOT_IP will re-apply
             ip_portmap_add(portmap_tab[i].proto, bind_ip, portmap_tab[i].mport, portmap_tab[i].daddr, portmap_tab[i].dport);
         }
     }
